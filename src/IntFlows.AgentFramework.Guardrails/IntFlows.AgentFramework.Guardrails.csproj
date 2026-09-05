@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageId>IntFlows.AgentFramework.Guardrails</PackageId>
+    <Version>0.1.0-preview.1</Version>
+    <Authors>IntFlows</Authors>
+    <Company>IntFlows</Company>
+    <Title>IntFlows Guardrails for Microsoft Agent Framework</Title>
+    <Description>Intent validation, prompt-injection detection, and reversible PII middleware for Microsoft Agent Framework.</Description>
+    <PackageTags>microsoft-agent-framework;agents;ai;guardrails;pii;security;middleware</PackageTags>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/IntFlows/IntFlows.AgentFramework.Guardrails</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/IntFlows/IntFlows.AgentFramework.Guardrails</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Agents.AI" Version="1.20.0" />
+  </ItemGroup>
+</Project>

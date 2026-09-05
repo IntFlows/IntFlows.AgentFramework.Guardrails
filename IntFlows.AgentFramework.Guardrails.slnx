@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/examples/">
+    <Project Path="examples/Guardrails.Example/Guardrails.Example.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/IntFlows.AgentFramework.Guardrails/IntFlows.AgentFramework.Guardrails.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Guardrails.Tests/Guardrails.Tests.csproj" />
+  </Folder>
+</Solution>
