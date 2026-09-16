@@ -8,7 +8,7 @@ It intercepts calls at the `IChatClient` boundary, blocks common prompt-injectio
 attempts, masks personally identifiable information before it reaches the model,
 and optionally restricts requests to allowed intents.
 
-> **Preview:** `0.1.0-preview.1` contains the initial in-memory implementation.
+> **Preview:** `0.1.0-preview.2` contains the initial in-memory implementation.
 > Its public API and behavior may change before version 1.0.
 
 ## Features
@@ -22,6 +22,8 @@ and optionally restricts requests to allowed intents.
 - Custom intent policies through `IIntentValidator`
 - Semantic intent matching through `SemanticIntentValidator`
 - Typed block reasons through `GuardrailException`
+- Tool allow, block, PII-redact, and application-approval policies
+- Versioned, content-free decision events for audit integrations
 - Normal and buffered streaming Agent Framework calls
 
 Redis and other persistent vault providers are outside the preview scope.
@@ -35,13 +37,13 @@ Redis and other persistent vault providers are outside the preview scope.
 ## Installation
 
 ```bash
-dotnet add package IntFlows.AgentFramework.Guardrails --version 0.1.0-preview.1
+dotnet add package IntFlows.AgentFramework.Guardrails --version 0.1.0-preview.2
 ```
 
 Or add a package reference:
 
 ```xml
-<PackageReference Include="IntFlows.AgentFramework.Guardrails" Version="0.1.0-preview.1" />
+<PackageReference Include="IntFlows.AgentFramework.Guardrails" Version="0.1.0-preview.2" />
 ```
 
 ## Quick start
@@ -158,6 +160,76 @@ tool result -> mask -> model -> restore final response -> application
 Supported content consists of text, function calls, and JSON-serializable function
 results. Images, audio, files, and other content types currently fail closed.
 
+### Tool policies
+
+Add function middleware to the agent builder using exact function names:
+
+```csharp
+var guardedAgent = new ChatClientAgent(
+        guardedClient,
+        instructions: "Help with support requests.",
+        tools: [searchDocs, updateTicket, deleteTicket])
+    .AsBuilder()
+    .UseGuardrailTools(new ToolGuardOptions
+    {
+        PolicyVersion = "support-tools-v1",
+        DefaultAction = GuardAction.Block,
+        Rules = new Dictionary<string, GuardAction>
+        {
+            ["searchDocs"] = GuardAction.Allow,
+            ["updateTicket"] = GuardAction.Redact,
+            ["deleteTicket"] = GuardAction.ApprovalRequired
+        },
+        ApproveAsync = async (call, cancellationToken) =>
+        {
+            // Ask a trusted, application-owned approval service.
+            return await approvals.IsApprovedAsync(
+                call.ToolName, call.Arguments, cancellationToken);
+        }
+    })
+    .Build();
+```
+
+| Action | Behavior |
+| --- | --- |
+| `Allow` | Execute the tool with its arguments unchanged. |
+| `Block` | Stop before executing the tool. |
+| `Redact` | Replace detected PII in nested string arguments with `[REDACTED]`, then execute. |
+| `ApprovalRequired` | Execute only when `ApproveAsync` returns `true`. |
+
+`DefaultAction = GuardAction.Block` creates an allowlist. With the default `Allow`,
+unlisted tools continue to run. Approval belongs to trusted application code; do
+not derive approval from model output. Redaction is irreversible and may make an
+argument invalid for its tool schema. Blocked and denied policies return a
+`GuardToolBlockedResult` and set the Agent Framework function loop to terminate.
+This prevents the tool from running and avoids sending its failure through another
+model call. Inspect the emitted decision to handle the policy outcome in application code.
+
+## Decision events
+
+Both model guardrails and tool policies can emit audit decisions. Events contain
+identifiers, timing, policy version, action, and reason only. They never include
+prompt text, PII values, or tool arguments.
+
+```csharp
+var modelOptions = new GuardOptions
+{
+    PolicyVersion = "support-model-v1",
+    OnDecision = async (decision, cancellationToken) =>
+        await auditStore.WriteAsync(decision, cancellationToken)
+};
+
+var toolOptions = new ToolGuardOptions
+{
+    PolicyVersion = "support-tools-v1",
+    OnDecision = async (decision, cancellationToken) =>
+        await auditStore.WriteAsync(decision, cancellationToken)
+};
+```
+
+`GuardDecision.SchemaVersion` is currently `"1"`. Callbacks are awaited so an
+application can choose fail-closed auditing: callback failures stop processing.
+
 ## Run the example
 
 The repository includes an offline `ChatClientAgent` example using a fake model.
@@ -168,6 +240,21 @@ dotnet build
 dotnet run --project examples/Guardrails.Example
 dotnet run --project examples/Guardrails.Example -- "Azure workflow for jane@example.com"
 ```
+
+With no command-line prompt, the example executes seven deterministic scenarios:
+
+1. PII masking and response restoration without a tool call
+2. An allowed lookup tool receiving restored PII
+3. A redacted tool receiving `[REDACTED]`
+4. A side-effect tool denied by the application approval callback
+5. An unlisted tool stopped by the default-block policy
+6. A prompt-injection request blocked before the model
+7. An unrelated intent blocked before the model
+
+The console shows every content-free audit decision, the masked text received by
+the model, and the arguments received by tools. The scripted `IChatClient` controls
+only model responses; `ChatClientAgent`, its function loop, `AIFunctionFactory`,
+chat middleware, and function middleware are all the real Agent Framework APIs.
 
 Run the executable behavioral checks with:
 

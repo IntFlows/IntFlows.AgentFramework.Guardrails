@@ -7,6 +7,8 @@ public sealed record GuardOptions
     public bool RestorePii { get; init; } = true;
     public int MaxInputCharacters { get; init; } = 100_000;
     public IIntentValidator? IntentValidator { get; init; }
+    public string PolicyVersion { get; init; } = "unversioned";
+    public Func<GuardDecision, CancellationToken, ValueTask>? OnDecision { get; init; }
 }
 
 public interface IIntentValidator
