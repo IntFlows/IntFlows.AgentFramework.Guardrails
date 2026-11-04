@@ -4,7 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageId>IntFlows.AgentFramework.Guardrails</PackageId>
-    <Version>0.1.0-preview.2</Version>
+    <Version>0.1.0-preview.3</Version>
     <Authors>IntFlows</Authors>
     <Company>IntFlows</Company>
     <Title>IntFlows Guardrails for Microsoft Agent Framework</Title>
@@ -17,7 +17,7 @@
     <RepositoryType>git</RepositoryType>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
-    <PackageReleaseNotes>Adds tool allow/block/redact/approval policies and versioned, content-free guard decision callbacks.</PackageReleaseNotes>
+    <PackageReleaseNotes>Adds pluggable PII detectors, per-call disposable vault providers, and whole-response tool allow/block checks.</PackageReleaseNotes>
   </PropertyGroup>
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />

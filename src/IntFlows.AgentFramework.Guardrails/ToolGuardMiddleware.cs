@@ -14,6 +14,7 @@ public static class ToolGuardMiddleware
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(options);
         Validate(options);
+        options = options with { Rules = new Dictionary<string, GuardAction>(options.Rules, StringComparer.Ordinal) };
 
         return builder.Use(async (agent, context, next, cancellationToken) =>
         {
@@ -68,7 +69,7 @@ public static class ToolGuardMiddleware
             if (action == GuardAction.Redact)
             {
                 foreach (var key in context.Arguments.Keys.ToArray())
-                    context.Arguments[key] = TransformValue(context.Arguments[key], text => PiiVault.Redact(text));
+                    context.Arguments[key] = TransformValue(context.Arguments[key], text => PiiVault.Redact(text, detector: options.PiiDetector));
             }
 
             var reason = action switch
@@ -84,6 +85,7 @@ public static class ToolGuardMiddleware
 
     private static void Validate(ToolGuardOptions options)
     {
+        ArgumentNullException.ThrowIfNull(options.Rules);
         if (options.DefaultAction is not (GuardAction.Allow or GuardAction.Block or
             GuardAction.Redact or GuardAction.ApprovalRequired))
             throw new ArgumentOutOfRangeException(nameof(options));

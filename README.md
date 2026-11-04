@@ -8,7 +8,7 @@ It intercepts calls at the `IChatClient` boundary, blocks common prompt-injectio
 attempts, masks personally identifiable information before it reaches the model,
 and optionally restricts requests to allowed intents.
 
-> **Preview:** `0.1.0-preview.2` contains the initial in-memory implementation.
+> **Preview:** `0.1.0-preview.3` adds pluggable PII detection and vaults to the in-memory implementation.
 > Its public API and behavior may change before version 1.0.
 
 ## Features
@@ -21,12 +21,13 @@ and optionally restricts requests to allowed intents.
 - Isolated, per-model-call in-memory token vaults
 - Custom intent policies through `IIntentValidator`
 - Semantic intent matching through `SemanticIntentValidator`
+- Exact-name tool allow/block policies checked before tool dispatch
 - Typed block reasons through `GuardrailException`
 - Tool allow, block, PII-redact, and application-approval policies
 - Versioned, content-free decision events for audit integrations
 - Normal and buffered streaming Agent Framework calls
 
-Redis and other persistent vault providers are outside the preview scope.
+Custom vault providers can be supplied through `IPiiVault`. No Redis adapter ships with the package.
 
 ## Requirements
 
@@ -37,13 +38,13 @@ Redis and other persistent vault providers are outside the preview scope.
 ## Installation
 
 ```bash
-dotnet add package IntFlows.AgentFramework.Guardrails --version 0.1.0-preview.2
+dotnet add package IntFlows.AgentFramework.Guardrails --version 0.1.0-preview.3
 ```
 
 Or add a package reference:
 
 ```xml
-<PackageReference Include="IntFlows.AgentFramework.Guardrails" Version="0.1.0-preview.2" />
+<PackageReference Include="IntFlows.AgentFramework.Guardrails" Version="0.1.0-preview.3" />
 ```
 
 ## Quick start
@@ -142,10 +143,43 @@ public sealed class SupportIntentValidator : IIntentValidator
 | `RestorePii` | `true` | Restore request PII in responses and tool arguments. |
 | `MaxInputCharacters` | `100000` | Reject requests whose scanned text exceeds this budget. |
 | `IntentValidator` | `null` | Optional application-specific or semantic intent policy. |
+| `PiiDetector` | `null` | Optional detector augmenting built-in PII matching. |
+| `PiiVaultFactory` | `null` | Creates an owned PII vault per model invocation. |
+| `Tools` | `null` | Optional exact-name tool policy; configured policies default to blocking unlisted tools. |
 
 Blocked calls throw `GuardrailException` without including the original input.
-Reasons are `PromptInjection`, `DisallowedIntent`, `InputTooLarge`, and
-`UnsupportedContent`. Blocked input never reaches the model.
+Reasons are `PromptInjection`, `DisallowedIntent`, `InputTooLarge`,
+`UnsupportedContent`, and `DisallowedTool`. Input blocks occur before model invocation;
+tool-response blocks occur after the model returns and before tool dispatch.
+
+## Model-response tool policies
+
+Configure tool rules before passing the guarded client to your agent:
+
+```csharp
+var options = new GuardOptions
+{
+    Tools = new ToolPolicy
+    {
+        DefaultAction = ToolAction.Block,
+        Rules = new Dictionary<string, ToolAction>
+        {
+            ["searchDocs"] = ToolAction.Allow,
+            ["deleteTicket"] = ToolAction.Block
+        }
+    }
+};
+```
+
+Names are exact and case-sensitive. With `Tools = null`, tool calls remain allowed.
+Rules are copied when the client is constructed. Every call in a model response
+must be allowed before the response is returned, so a blocked call rejects the
+whole batch with `DisallowedTool`, including buffered streaming responses. This
+check runs even when PII masking or restoration is disabled. The model has already
+run when a tool response is blocked; no calls in that response reach the agent.
+These rules govern calls returned through this client. Direct tool execution and
+application authorization remain the application's responsibility. Use
+`UseGuardrailTools` below for approval and PII-redaction policies at execution.
 
 ## Tool calls
 
@@ -160,7 +194,7 @@ tool result -> mask -> model -> restore final response -> application
 Supported content consists of text, function calls, and JSON-serializable function
 results. Images, audio, files, and other content types currently fail closed.
 
-### Tool policies
+### Tool execution policies
 
 Add function middleware to the agent builder using exact function names:
 
@@ -204,6 +238,53 @@ argument invalid for its tool schema. Blocked and denied policies return a
 `GuardToolBlockedResult` and set the Agent Framework function loop to terminate.
 This prevents the tool from running and avoids sending its failure through another
 model call. Inspect the emitted decision to handle the policy outcome in application code.
+
+## Pluggable PII detection and vaults
+
+Implement `IPiiDetector` to return spans in the original text. Spans use UTF-16
+character offsets and positive lengths; types contain uppercase letters and
+underscores, such as `NAME`. Custom detections augment the built-in regex matches.
+Overlapping spans are merged before masking. Invalid spans fail before the model
+is called. Shared detectors must be thread-safe; detector lifetime belongs to the caller.
+
+```csharp
+public sealed class CustomerNameDetector : IPiiDetector
+{
+    public IEnumerable<PiiMatch> Detect(string text)
+    {
+        var start = text.IndexOf("Jane Smith", StringComparison.Ordinal);
+        if (start >= 0) yield return new PiiMatch(start, "Jane Smith".Length, "NAME");
+    }
+}
+```
+
+Pass the same detector to `GuardOptions.PiiDetector` for model masking and
+`ToolGuardOptions.PiiDetector` for tool redaction. Model-backed detectors can
+implement this interface, but no classifier, model download, or inference runtime
+is bundled. Detection is synchronous in this preview.
+
+The default public `PiiVault` implements `IPiiVault` and can also be used directly:
+
+```csharp
+var detector = new CustomerNameDetector();
+var options = new GuardOptions { PiiDetector = detector };
+using var vault = new PiiVault(detector);
+var masked = vault.Mask("Jane Smith: jane@example.com");
+var restored = vault.Restore(masked);
+```
+
+For custom storage, set `GuardOptions.PiiVaultFactory` to a factory returning a
+fresh `IPiiVault` for every model invocation. A vault owns detection, masking,
+restoration, and its distinct token namespace. Do not configure `PiiDetector`
+alongside the factory: compose detection inside the custom vault instead. The
+factory must return a non-null, exclusively owned scope; shared vault instances
+are unsupported. The guard disposes the scope after restoration, including blocked
+requests and model failures. No vault is created with `MaskPii = false`.
+
+A custom adapter controls storage retention, expiry, and cleanup in `Dispose`.
+It must never restore tokens belonging to another scope. These interfaces do not
+provide a Redis implementation or cross-call persistence automatically. The built-in
+vault clears its dictionaries on disposal; this is not cryptographic erasure.
 
 ## Decision events
 
@@ -269,7 +350,7 @@ The check process exits with a nonzero code on failure.
 - Prompt-injection and PII checks use regular expressions. They can miss harmful
   or sensitive input and can reject benign input.
 - Numeric PII matches are candidates and are not checksum-validated. Names,
-  addresses, and model-based PII classification are not included yet.
+  addresses, and model-based PII classification require a custom detector.
 - JSON string values are transformed. Field names, tool names and schemas,
   provider options, and opaque provider state are not scanned.
 - System and developer messages are masked but exempt from injection checks. The
@@ -277,8 +358,8 @@ The check process exits with a nonzero code on failure.
 - Streaming calls are buffered so placeholders can be restored atomically.
 - Raw provider payloads and extension metadata are omitted from transformed
   messages so unscanned copies of the input are not forwarded.
-- Each vault lasts for one model invocation. There is no persistence, Redis,
-  cross-process recovery, audit store, or cryptographic erasure.
+- Default vaults last for one model invocation. External persistence requires a
+  custom adapter. No Redis adapter, audit store, or cryptographic erasure is bundled.
 - Restored PII is visible to application code, tools, logs, and agent history.
   Set `RestorePii = false` when downstream code should receive opaque tokens.
 
