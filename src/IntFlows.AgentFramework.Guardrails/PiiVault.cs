@@ -18,6 +18,15 @@ internal sealed class PiiVault
     private readonly Dictionary<string, string> _tokens = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _values = new(StringComparer.Ordinal);
 
+    public int Count => _tokens.Count;
+
+    public static string Redact(string text, string replacement = "[REDACTED]")
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        ArgumentNullException.ThrowIfNull(replacement);
+        return Detector.Replace(text, replacement);
+    }
+
     public string Mask(string text) => Detector.Replace(text, match =>
     {
         if (_values.TryGetValue(match.Value, out var existing)) return existing;

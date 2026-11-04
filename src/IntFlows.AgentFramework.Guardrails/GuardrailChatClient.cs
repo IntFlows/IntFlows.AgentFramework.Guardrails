@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -29,6 +30,15 @@ public sealed class GuardrailChatClient : DelegatingChatClient
     {
         ArgumentNullException.ThrowIfNull(messages);
         cancellationToken.ThrowIfCancellationRequested();
+        var requestStarted = Stopwatch.GetTimestamp();
+        async ValueTask Decide(GuardKind guard, GuardAction action, GuardReasonCode reason, double? confidence = null)
+        {
+            if (_options.OnDecision is null) return;
+            var decision = new GuardDecision("1", Guid.NewGuid(), DateTimeOffset.UtcNow, guard,
+                _options.PolicyVersion, action, reason,
+                Stopwatch.GetElapsedTime(requestStarted).TotalMilliseconds, confidence);
+            await _options.OnDecision(decision, cancellationToken).ConfigureAwait(false);
+        }
         var vault = new PiiVault();
         var length = 0;
         string Prepare(string text)
@@ -45,6 +55,7 @@ public sealed class GuardrailChatClient : DelegatingChatClient
         // Inspect the whole non-system history so a trailing message cannot hide an attack.
         if (_options.DetectPromptInjection)
         {
+            var injectionDetected = false;
             foreach (var message in input.Where(m => m.Role != ChatRole.System && m.Role != new ChatRole("developer")))
             {
                 var segments = new List<string>();
@@ -54,14 +65,28 @@ public sealed class GuardrailChatClient : DelegatingChatClient
                     return text;
                 }, rejectUnsupported: true);
                 if (Injection.IsMatch(string.Join("\n", segments)))
-                    throw new GuardrailException(GuardBlockReason.PromptInjection);
+                {
+                    injectionDetected = true;
+                    break;
+                }
             }
+            await Decide(GuardKind.Injection, injectionDetected ? GuardAction.Block : GuardAction.Allow,
+                injectionDetected ? GuardReasonCode.InjectionPattern : GuardReasonCode.InjectionClear);
+            if (injectionDetected) throw new GuardrailException(GuardBlockReason.PromptInjection);
         }
 
         var latestUser = prepared.LastOrDefault(m => m.Role == ChatRole.User);
-        if (_options.IntentValidator is { } validator && latestUser is not null &&
-            !await validator.IsAllowedAsync(latestUser.Text, cancellationToken).ConfigureAwait(false))
-            throw new GuardrailException(GuardBlockReason.DisallowedIntent);
+        if (_options.IntentValidator is { } validator && latestUser is not null)
+        {
+            var allowed = await validator.IsAllowedAsync(latestUser.Text, cancellationToken).ConfigureAwait(false);
+            await Decide(GuardKind.Intent, allowed ? GuardAction.Allow : GuardAction.Block,
+                allowed ? GuardReasonCode.IntentAllowed : GuardReasonCode.IntentRejected);
+            if (!allowed) throw new GuardrailException(GuardBlockReason.DisallowedIntent);
+        }
+
+        if (_options.MaskPii)
+            await Decide(GuardKind.Pii, vault.Count > 0 ? GuardAction.Redact : GuardAction.Allow,
+                vault.Count > 0 ? GuardReasonCode.PiiDetected : GuardReasonCode.PiiClear);
 
         // Clone options as well; callers may reuse them across concurrent requests.
         var response = await InnerClient.GetResponseAsync(prepared, options?.Clone(), cancellationToken).ConfigureAwait(false);

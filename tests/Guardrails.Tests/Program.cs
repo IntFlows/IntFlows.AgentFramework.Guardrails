@@ -148,6 +148,63 @@ await Test("Semantic intent accepts matching vectors and rejects unrelated vecto
     Check(!await validator.IsAllowedAsync("Cats"));
     Check(!await validator.IsAllowedAsync(""));
 });
+await Test("Content-free model decisions are emitted", async () =>
+{
+    var decisions = new List<GuardDecision>();
+    using var client = new GuardrailChatClient(FakeClient.Echo(), new()
+    {
+        PolicyVersion = "support-v2",
+        OnDecision = (decision, _) => { decisions.Add(decision); return ValueTask.CompletedTask; }
+    });
+    await client.GetResponseAsync([new(ChatRole.User, "jane@example.com")]);
+    Check(decisions.Select(d => d.ReasonCode).SequenceEqual([
+        GuardReasonCode.InjectionClear, GuardReasonCode.PiiDetected]));
+    Check(decisions.All(d => d.SchemaVersion == "1" && d.PolicyVersion == "support-v2"));
+    Check(!JsonSerializer.Serialize(decisions).Contains("jane@example.com"));
+});
+await Test("Tool policies block, redact, approve, and audit", async () =>
+{
+    async Task<(bool Called, int ModelCalls, List<GuardDecision> Decisions)> Run(
+        GuardAction action, bool? approval = null)
+    {
+        var called = false;
+        var calls = 0;
+        var decisions = new List<GuardDecision>();
+        var tool = AIFunctionFactory.Create((string email) =>
+        {
+            called = true;
+            if (action == GuardAction.Redact) Check(email == "[REDACTED]");
+            return "done";
+        }, "sendEmail");
+        var baseAgent = new ChatClientAgent(new FakeClient(messages =>
+        {
+            calls++;
+            if (calls == 1) return new(new ChatMessage(ChatRole.Assistant,
+                [new FunctionCallContent("call1", "sendEmail",
+                    new Dictionary<string, object?> { ["email"] = "jane@example.com" })]));
+            return new(new ChatMessage(ChatRole.Assistant, "finished"));
+        }), tools: [tool]);
+        var guarded = baseAgent.AsBuilder().UseGuardrailTools(new()
+        {
+            DefaultAction = GuardAction.Block,
+            Rules = new Dictionary<string, GuardAction> { ["sendEmail"] = action },
+            ApproveAsync = approval is null ? null : (_, _) => ValueTask.FromResult(approval.Value),
+            OnDecision = (decision, _) => { decisions.Add(decision); return ValueTask.CompletedTask; }
+        }).Build();
+        await guarded.RunAsync("send it");
+        return (called, calls, decisions);
+    }
+
+    var blocked = await Run(GuardAction.Block);
+    Check(!blocked.Called && blocked.ModelCalls == 1 && blocked.Decisions.Single().ReasonCode == GuardReasonCode.ToolBlocked);
+    var redacted = await Run(GuardAction.Redact);
+    Check(redacted.Called && redacted.Decisions.Single().ReasonCode == GuardReasonCode.ToolRedacted);
+    var denied = await Run(GuardAction.ApprovalRequired, false);
+    Check(!denied.Called && denied.ModelCalls == 1 && denied.Decisions.Single().ReasonCode == GuardReasonCode.ToolApprovalDenied);
+    var approved = await Run(GuardAction.ApprovalRequired, true);
+    Check(approved.Called && approved.Decisions.Single().ReasonCode == GuardReasonCode.ToolApproved);
+    Check(!JsonSerializer.Serialize(approved.Decisions).Contains("jane@example.com"));
+});
 Console.WriteLine($"{passed} tests passed.");
 
 sealed class RejectIntent : IIntentValidator
