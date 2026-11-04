@@ -18,11 +18,30 @@ public sealed class GuardrailChatClient : DelegatingChatClient
         @"\b(?:you are (?:now )?a hacker|do anything now|dan mode)\b",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(250));
     private readonly GuardOptions _options;
+    private readonly Dictionary<string, ToolAction>? _toolRules;
+    private readonly ToolAction _defaultToolAction;
 
     public GuardrailChatClient(IChatClient innerClient, GuardOptions? options = null) : base(innerClient)
     {
         _options = options ?? new();
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(_options.MaxInputCharacters);
+        if (_options.PiiDetector is not null && _options.PiiVaultFactory is not null)
+            throw new ArgumentException("Configure a detector or a vault factory; custom vaults own detection.", nameof(options));
+        if (_options.Tools is { } policy)
+        {
+            if (!Enum.IsDefined(policy.DefaultAction))
+                throw new ArgumentOutOfRangeException(nameof(options), "Invalid default tool action.");
+            ArgumentNullException.ThrowIfNull(policy.Rules);
+            _defaultToolAction = policy.DefaultAction;
+            _toolRules = new Dictionary<string, ToolAction>(StringComparer.Ordinal);
+            foreach (var (name, action) in policy.Rules)
+            {
+                ArgumentException.ThrowIfNullOrWhiteSpace(name);
+                if (!Enum.IsDefined(action))
+                    throw new ArgumentOutOfRangeException(nameof(options), "Invalid tool action.");
+                _toolRules.Add(name, action);
+            }
+        }
     }
 
     public override async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages,
@@ -39,7 +58,7 @@ public sealed class GuardrailChatClient : DelegatingChatClient
                 Stopwatch.GetElapsedTime(requestStarted).TotalMilliseconds, confidence);
             await _options.OnDecision(decision, cancellationToken).ConfigureAwait(false);
         }
-        var vault = new PiiVault();
+        using var vault = _options.MaskPii ? (_options.PiiVaultFactory is { } factory ? factory() ?? throw new InvalidOperationException("PII vault factory returned null.") : new PiiVault(_options.PiiDetector)) : null;
         var length = 0;
         string Prepare(string text)
         {
@@ -47,7 +66,7 @@ public sealed class GuardrailChatClient : DelegatingChatClient
             if (text.Length > _options.MaxInputCharacters - length)
                 throw new GuardrailException(GuardBlockReason.InputTooLarge);
             length += text.Length;
-            return _options.MaskPii ? vault.Mask(text) : text;
+            return _options.MaskPii ? vault!.Mask(text) : text;
         }
 
         var input = messages.ToList();
@@ -85,13 +104,25 @@ public sealed class GuardrailChatClient : DelegatingChatClient
         }
 
         if (_options.MaskPii)
-            await Decide(GuardKind.Pii, vault.Count > 0 ? GuardAction.Redact : GuardAction.Allow,
-                vault.Count > 0 ? GuardReasonCode.PiiDetected : GuardReasonCode.PiiClear);
+            await Decide(GuardKind.Pii, vault!.Count > 0 ? GuardAction.Redact : GuardAction.Allow,
+                vault!.Count > 0 ? GuardReasonCode.PiiDetected : GuardReasonCode.PiiClear);
 
         // Clone options as well; callers may reuse them across concurrent requests.
         var response = await InnerClient.GetResponseAsync(prepared, options?.Clone(), cancellationToken).ConfigureAwait(false);
+        // Validate the entire batch before any call can reach the agent's tool loop.
+        if (_toolRules is not null)
+        {
+            foreach (var call in response.Messages.SelectMany(message => message.Contents).OfType<FunctionCallContent>())
+            {
+                if (_toolRules.GetValueOrDefault(call.Name, _defaultToolAction) != ToolAction.Allow)
+                {
+                    await Decide(GuardKind.Tool, GuardAction.Block, GuardReasonCode.ToolBlocked);
+                    throw new GuardrailException(GuardBlockReason.DisallowedTool);
+                }
+            }
+        }
         if (!_options.MaskPii || !_options.RestorePii) return response;
-        return new ChatResponse(TransformMessages(response.Messages, vault.Restore, rejectUnsupported: false))
+        return new ChatResponse(TransformMessages(response.Messages, vault!.Restore, rejectUnsupported: false))
         {
             ResponseId = response.ResponseId,
             ConversationId = response.ConversationId,

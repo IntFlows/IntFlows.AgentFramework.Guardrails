@@ -30,6 +30,7 @@ public sealed record ToolPolicyContext(
 
 public sealed record ToolGuardOptions
 {
+    public IPiiDetector? PiiDetector { get; init; }
     public GuardAction DefaultAction { get; init; } = GuardAction.Allow;
     public IReadOnlyDictionary<string, GuardAction> Rules { get; init; } =
         new Dictionary<string, GuardAction>(StringComparer.Ordinal);
